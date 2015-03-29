@@ -1,4 +1,5 @@
 from mpd import MPDClient, MPDError, CommandError
+import mpd
 import sys
 import pythoncom
 import win32com.client
@@ -248,6 +249,7 @@ def MPDISConnect():
 
 def MPDConnect():
     global _mpdclient
+
     if MPDISConnect():
         return 0
     for i in range(0,_connectretry):
@@ -390,7 +392,7 @@ def StartMMMonitor():
         #Stop playig and sync MPD playlist 
         _mpdclient.stop()
         _mpdclient.clear()
-        SyncMMNowPlayToMPD()
+        SyncMMNowPlayingToMPD()
 
         while not _quiting:
             # required by this script because no other message loop running
@@ -407,7 +409,7 @@ def StartMMMonitor():
     print ("** monitor stopped; received " + str(_sdbclient._play_events) + " play events ***")
  
 def Main():
-     
+   
     #handle command line argument
     total = len(sys.argv)
     cmdargs = str(sys.argv)
@@ -422,8 +424,6 @@ def Main():
         #print (_mpdclient.stats())
 
     else:
-        #connect to teh MPD server
-        MPDConnect()
 
         for i in range(0,total):
             if str(sys.argv[i]) == '-startmonitor':
