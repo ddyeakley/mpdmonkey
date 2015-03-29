@@ -1,6 +1,4 @@
-# monitor player events from MediaMonkey.  print(event flag and player state info for each
-# note: once started, script does not exit until MM is shut down.
-import mpd
+from mpd import MPDClient, MPDError, CommandError
 import sys
 import pythoncom
 import win32com.client
@@ -9,6 +7,8 @@ import json
 
 _mpdserver = "192.168.1.11"
 _mpdport = 6600
+_connectretry=3
+_connectretrydelay=5
 _pathfixfrom1= "D:\\Music"
 _pathfixto1= "USB/music"
 _pathfixfrom2= "\\"
@@ -17,6 +17,8 @@ _mpdplaylist="MusicServer Playlist"
 _maxpath=256
 boolReps = ['F', 'T']   # hacky!
 
+_mmconnected = False
+_mpdconnected = False
 _quiting = False
 _mpdclient = None
 _sdbclient = None
@@ -37,19 +39,19 @@ class MMEventHandlers():
         self._play_events += 1
         print(">> MMEventHandlers.OnPlay")
         if _sdbclient.Player.CurrentSongIndex>-1:
-            _mpdclient.play(_sdbclient.Player.CurrentSongIndex)
+            MPDPlay(_sdbclient.Player.CurrentSongIndex)
         self.showMMStatus()
     def OnPause(self):      #OK
         print(">> MMEventHandlers.OnPause")
         if _sdbclient.Player.isPaused: 
-            _mpdclient.pause(1)
+            MPDPause(1)
         else:
-            _mpdclient.pause(0)
+            MPDPause(0)
         self.showMMStatus()
     def OnStop(self):
         print(">> MMEventHandlers.OnStop")
         if not _quiting:
-            _mpdclient.stop()
+            MPDStop()
         self.showMMStatus()
     def OnTrackEnd(self):
         print(">> MMEventHandlers.OnTrackEnd")
@@ -64,7 +66,7 @@ class MMEventHandlers():
     def OnSeek(self):       #OK
         print(">> MMEventHandlers.OnSeek")
         print ('Seek [', _sdbclient.Player.PlaybackTime, '|', _sdbclient.Player.CurrentSongLength, ']')
-        _mpdclient.seek(_sdbclient.Player.CurrentSongIndex, int(_sdbclient.Player.PlaybackTime*.001))
+        MPDSeek(_sdbclient.Player.CurrentSongIndex, int(_sdbclient.Player.PlaybackTime*.001))
         self.showMMStatus()
     def OnNowPlayingModified(self):     #OK
         print(">> MMEventHandlers.OnNowPlayingModified")
@@ -89,17 +91,21 @@ class MMEventHandlers():
         print('[', playlist.Invoke(201,0,2,True), ']')
 
 def MPDClearPlaylists():
-    #Remove current playlist
-    mpdplaylists=_mpdclient.listplaylists();
-    for itm in mpdplaylists:
-        _mpdclient.rm(itm['playlist'])
+    try:
+        print(">MPDClearPlaylists()")
+        mpdplaylists=MPDListPlaylists();
+        for itm in mpdplaylists:
+            MPDRemove(itm['playlist'])
+    except (MPDError, IOError):
+        print("   ! Error calling MPDClearPlaylists()") 
+    print("<MPDClearPlaylists()")        
         
 def SyncMMPlaylistToMPD():
 
     #Remove current playlist
-    mpdplaylists=_mpdclient.listplaylists();
+    mpdplaylists=MPDListPlaylist();
     for itm in mpdplaylists:
-        _mpdclient.rm(itm['playlist'])
+        MPDRemove(itm['playlist'])
     
     #Find MPC Playlist in MM
     rootplaylist=_sdbclient.PlaylistByID(-1)
@@ -114,7 +120,7 @@ def SyncMMPlaylistToMPD():
                 itm=playlists.Item(j)
                 playlisttitle=itm.Title
                 print (" ", playlisttitle)
-                _mpdclient.clear();
+                MPDClear()
                 tracks=itm.Tracks
 
                 #Iterate through Playlist Tracks
@@ -124,23 +130,23 @@ def SyncMMPlaylistToMPD():
                     fixedmpdtrack=FixString (mpdtrack)
                     print ("   ", fixedmpdtrack)
                     try: 
-                        _mpdclient.add(fixedmpdtrack);
+                        MPDAdd(fixedmpdtrack)
                     except: 
                         pass 
-                _mpdclient.save(playlisttitle)
-            break;
-            
+                MPDSave(playlisttitle)
+            break
 
+    
 #todo: stop if current song is removed  
-def SyncMMNowPlayToMPD():
+def SyncMMNowPlayingToMPD():
     print("?MM Count:" , _sdbclient.Player.CurrentSongList.Count)
-    mpdcount=int(_mpdclient.status()['playlistlength'])
+    mpdcount=int(MPDStatus()['playlistlength'])
     print ("?MPD Count ", mpdcount)
     if _sdbclient.Player.CurrentSongList.Count == 0:
         # playlist cleared
         print ("Playlist Changed: Cleared")
-        _mpdclient.clear()	
-        _mpdclient.stop()
+        MPDClear()	
+        MPDStop()
     else:
         if _sdbclient.Player.CurrentSongList.Count == mpdcount or _sdbclient.Player.CurrentSongList.Count > mpdcount:
              #songs added  or moved in playlist
@@ -150,16 +156,16 @@ def SyncMMNowPlayToMPD():
                     mmsong=_sdbclient.Player.CurrentSongList.Item(i).Path[:_maxpath]
                     fixedmmsong=FixString (mmsong)
                     print("   + ", fixedmmsong)
-                    _mpdclient.add(fixedmmsong)
+                    MPDAdd(fixedmmsong)
             else:
-                    print ("Playlist changed: Song added moved")
+                    print ("Playlist changed: Song added or moved")
                     for mmindex in range(0, _sdbclient.Player.CurrentSongList.Count):
                         mmsong=_sdbclient.Player.CurrentSongList.Item(mmindex).Path[:128]
                         fixedmmsong=FixString (mmsong)
-                        mpdcount=int(_mpdclient.status()['playlistlength'])
+                        mpdcount=int(MPDStatus()['playlistlength'])
                         found=0
                         for mpdindex in range(mmindex, mpdcount):
-                            mpdsong=_mpdclient.playlist()[mpdindex]
+                            mpdsong=MPDPlaylist()[mpdindex]
                             fixedmpdsong=mpdsong.replace("file: ", "")
                             if fixedmmsong == fixedmpdsong:
                                 found=1
@@ -168,19 +174,19 @@ def SyncMMNowPlayToMPD():
                                     break
                                 else:
                                     print ("   m", fixedmmsong)
-                                    _mpdclient.move(mpdindex, mmindex)
+                                    MPDMove(mpdindex, mmindex)
                         if not found:
-                            _mpdclient.add(fixedmmsong)
+                            MPDAdd(fixedmmsong)
                             print ("   +", fixedmmsong)
                             if mpdcount != mmindex:
-                                _mpdclient.move(mpdcount, mmindex)
+                                MPDMove(mpdcount, mmindex)
                                 print ("   m", fixedmmsong)
         else:
             #songs removed from playlist
             print ("Playlist Changed: Songs Removed")
             i=0
             while i < mpdcount:
-                mpdsong=_mpdclient.playlist()[i]
+                mpdsong=MPDPlaylist()[i]
                 fixedmpdsong=mpdsong.replace("file: ", "")
                 if i <_sdbclient.Player.CurrentSongList.Count:
                     mmsong=_sdbclient.Player.CurrentSongList.Item(i).Path[:_maxpath]
@@ -189,21 +195,21 @@ def SyncMMNowPlayToMPD():
                         print ("Ok: ", fixedmmsong)
                         i=i+1
                     else:
-                        _mpdclient.delete(i)
+                        MPDDelete(i)
                         mpdcount=mpdcount-1
                         print("   -", fixedmpdsong)
                 else:
-                    _mpdclient.delete(i)
+                    MPDDelete(i)
                     mpdcount=mpdcount-1
                     print("   -", fixedmpdsong)
         
     # Check sync
     syncerror=False
-    if _sdbclient.Player.CurrentSongList.Count != int(_mpdclient.status()['playlistlength']):
+    if _sdbclient.Player.CurrentSongList.Count != int(MPDStatus()['playlistlength']):
         syncerror=True    
     else:
         for i in range(0, _sdbclient.Player.CurrentSongList.Count):
-            mpdsong=_mpdclient.playlist()[i]
+            mpdsong=MPDPlaylist()[i]
             fixedmpdsong=mpdsong.replace("file: ", "")
             mmsong=_sdbclient.Player.CurrentSongList.Item(i).Path[:_maxpath]
             fixedmmsong=FixString (mmsong)
@@ -220,40 +226,205 @@ def FixString(string):
 def StopMMMonitor():
     _quiting=True
 
-def StartMMMonitor():
-
-    # running the script will start MM if it's not already running
+def MMConnect(withevents):
     global _sdbclient
-    _sdbclient = win32com.client.DispatchWithEvents('SongsDB.SDBApplication', MMEventHandlers)
-    print ("** monitor started ***")
+    if withevents == True:
+        _sdbclient = win32com.client.DispatchWithEvents('SongsDB.SDBApplication', MMEventHandlers)
+        print ("** Connected to MediaMonkey with events ***")
+    else:
+        _sdbclient = win32com.client.Dispatch("SongsDB.SDBApplication")
+        print ("** Connected to MediaMonkey ***")
+    _mmconnected=True
+   
+def MPDISConnect():
+    try:
+        _mpdclient.ping()
+        #print ("?MPDISConnect()=", True)
+        #print ("?MPDISConnect()=", True)
+    except Exception as e:
+        print ("?MPDISConnect()=", False)
+        return False
+    return True
 
-    _mpdclient.stop()
-    _mpdclient.clear()
-    SyncMMNowPlayToMPD()
+def MPDConnect():
+    global _mpdclient
+    if MPDISConnect():
+        return 0
+    for i in range(0,_connectretry):
+        try:
+            _mpdclient = mpd.MPDClient(use_unicode=True)
+            _mpdclient.connect(_mpdserver, _mpdport)
+            _mpdconnected=True
+            print ("** Connected to MPD server ***")
+            break            
+        except (MPDError, IOError):
+            print("Retry:", i+1, " - Unable to connect to: ", _mpdserver,":", _mpdport)
+            time.sleep(_connectretrydelay)
+            pass
+    if i == _connectretry-1:
+        _mpdconnected=False
+        sys.exit(1)
+        
+def MPDDisconnect():
+        # Try to tell MPD we're closing the connection first
+        global _mpdclient
+        try:
+            _mpdclient.close()
+        # If that fails, don't worry, just ignore it and disconnect
+        except (MPDError, IOError):
+            pass
 
-    while not _quiting:
-        # required by this script because no other message loop running
-        # if the app has its message loop (i.e., has a Windows UI), then
-        # the events will arrive with no additional handling
-        pythoncom.PumpWaitingMessages()
-        time.sleep(0.2)
+        try:
+            _mpdclient.disconnect()
+            print ("** Disconnected from MPD server ***")
+
+        # Disconnecting failed, so use a new client object instead
+        # This should never happen.  If it does, something is seriously broken,
+        # and the client object shouldn't be trusted to be re-used.
+        except (MPDError, IOError):
+            print ("** Disconnected from MPD server (unexpected MPDError) ***")
+            _mpdclient = MPDClient()
+            pass        
+        _mpdconnected=False
+            
+
+def MPDPlaylist():
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        return _mpdclient.playlist()
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDPlaylist()")
+
+def MPDListPlaylist():
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        return _mpdclient.listplaylists()
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDListPlaylist()")
+               
+def MPDStatus():
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        return _mpdclient.status()
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDStatus()")
+        
+def MPDRemove(item):
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.rm(item)
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDRemove()")
+        
+def MPDPlay(index):
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.play(index)
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDPlay()")
+
+def MPDSeek(songindex, val):
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.seek(songindex, val)
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDSeek()")
+
+def MPDPause(val):
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.pause(val)
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDPlay()")
+        
+def MPDStop():
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.stop()
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDStop()")
+
+def MPDClear():
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.clear()
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDClear()")
+        
+def MPDDelete(track):
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.delete(track)
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDDelete()")
+
+def MPDAdd(track):
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.add(track)
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDAdd()")
+
+def MPDMove(oldindex,newindex):
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.move(oldindex, newindex)
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDMove()")
+
+def MPDSave(playlisttitle):
+    try:
+        MPDConnect() #make sure we are connected to the MPD server
+        _mpdclient.save(playlisttitle)
+    except (MPDError, IOError):
+        print ("! unhandled error in MPDSave)")
+        
+def StartMMMonitor():
+    # note: once started, script does not exit until MM is shut down.
+    # running the script will start MM if it's not already running
+    try:
+        #Connect to MPD Server and MM
+        MPDConnect()
+        MMConnect(True)
+        
+        #Stop playig and sync MPD playlist 
+        _mpdclient.stop()
+        _mpdclient.clear()
+        SyncMMNowPlayToMPD()
+
+        while not _quiting:
+            # required by this script because no other message loop running
+            # if the app has its message loop (i.e., has a Windows UI), then
+            # the events will arrive with no additional handling
+            pythoncom.PumpWaitingMessages()
+            time.sleep(0.2)
+
+    except (MPDError, IOError):
+        #if there is a error try to restart monitor
+        StartMMMonitor()
  
     # note that SDB instance includes members of of the MMEventHandlers class
     print ("** monitor stopped; received " + str(_sdbclient._play_events) + " play events ***")
  
 def Main():
-    global _sdbclient
-    global _mpdclient
-    _mpdclient = mpd.MPDClient(use_unicode=True)
-    _mpdclient.connect(_mpdserver, _mpdport)
-
+     
+    #handle command line argument
     total = len(sys.argv)
     cmdargs = str(sys.argv)
-    if total == 1:
-        #startMMMonitor()
-        _sdbclient = win32com.client.Dispatch("SongsDB.SDBApplication")
-        SyncMMPlaylistToMPD()
+
+    #default action, no comand line argument
+    if total == 1:   
+        StartMMMonitor()
+        #MMConnect(False)
+        #time.sleep(5)
+        #SyncMMNowPlayingToMPD()
+        #SyncMMPlaylistToMPD()
+        #print (_mpdclient.stats())
+
     else:
+        #connect to teh MPD server
+        MPDConnect()
+
         for i in range(0,total):
             if str(sys.argv[i]) == '-startmonitor':
                 StartMMMonitor()
@@ -267,16 +438,26 @@ def Main():
                 _mpdclient.stop();
             elif str(sys.argv[i]) == '-pause':
                 _mpdclient.pause();
+            elif str(sys.argv[i]) == '-stats':
+                _mpdclient.stats();
             elif str(sys.argv[i]) == '-next':
                 _mpdclient.next();
             elif str(sys.argv[i]) == '-previous':
                 _mpdclient.previous();
             elif str(sys.argv[i]) == '-syncplaylists':
-                _sdbclient = win32com.client.Dispatch("SongsDB.SDBApplication")
+                MMConnect(False)
                 SyncMMPlaylistToMPD()
             elif str(sys.argv[i]) == '-syncnowplaying':
-                _sdbclient = win32com.client.Dispatch("SongsDB.SDBApplication")
-                SyncMMNowPlayToMPD()
+                MMConnect(False)
+                SyncMMNowPlayingToMPD()
+    MPDDisconnect()
+    sys.exit(0)
 
 if __name__ == '__main__':
+        
+    try:
         Main()
+    except Exception as e:
+        print("***** Unexpected exception: %s" % e, file=sys.stderr)
+        sys.exit(1)
+        
